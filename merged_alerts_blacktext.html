@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ephrata & US Weather Alerts</title>
+
+  <!-- Tailwind for modern UI -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Leaflet for map -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    body { font-family: 'Inter', sans-serif; }
+    .fade-in { animation: fadeIn 0.5s ease-in-out; }
+    @keyframes fadeIn { from { opacity:0; transform:translateY(10px);} to {opacity:1; transform:translateY(0);} }
+
+    /* Map + sidebar styling (from alertmapUSA) */
+    #map { height: 100vh; width: 100%; }
+    #sidebar {
+      position: fixed; top: 0; left: 0;
+      width: 300px; max-width: 80vw; height: 100%;
+      background: white; border-radius: 0 5px 5px 0;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+      z-index: 1001; overflow-y: auto;
+      transition: transform 0.3s ease;
+    }
+    #sidebar.hidden { transform: translateX(-100%); }
+    #sidebar-header { padding: 15px; background: #f0f0f0; }
+    #sidebar-content { padding: 15px; }
+    .alert-item { margin-bottom: 15px; padding: 15px; border-radius: 3px; cursor: pointer; }
+    .alert-item:hover { background: #f5f5f5; }
+    #toggle-sidebar, #toggle-dark-mode, #toggle-radar, #play-pause-radar {
+      cursor: pointer; font-size: 1.3rem; margin-left: 12px;
+    }
+    #radar-slider { width: 100%; margin-top: 10px; }
+    .loader { position: fixed; top:50%; left:50%; transform:translate(-50%,-50%); font-size:1.2rem; z-index:1000; }
+    #sidebar-tab {
+      position: fixed; top:80px; left:0; background:#f0f0f0; padding:12px;
+      border-radius:0 5px 5px 0; cursor:pointer; z-index:1000; display:none;
+      box-shadow:2px 2px 5px rgba(0,0,0,0.3);
+    }
+    @media (max-width: 768px) {
+      #sidebar { width: 90vw; }
+      .alert-item { font-size: 0.9rem; }
+    }
+  
+#sidebar, #sidebar * {
+  color: #000 !important;
+}
+
+</style>
+</head>
+<body class="bg-slate-50 dark:bg-slate-900 text-gray-800 dark:text-gray-200">
+
+  <!-- Ephrata Alerts Section -->
+  <div class="w-full max-w-2xl mx-auto p-6 md:p-10 space-y-8">
+    <header class="text-center pt-4 pb-2">
+      <h1 class="text-4xl md:text-5xl font-bold text-slate-900 dark:text-white">Weather Alerts</h1>
+      <h2 class="text-xl md:text-2xl font-medium mt-2 text-slate-600 dark:text-slate-400">Ephrata, PA</h2>
+    </header>
+
+    <!-- Loading -->
+    <div id="loading" class="flex flex-col items-center justify-center p-12 rounded-2xl bg-white dark:bg-slate-800 shadow-xl">
+      <div class="animate-pulse text-gray-500 dark:text-gray-400">
+        <svg class="w-16 h-16 mx-auto text-blue-500 dark:text-blue-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 4m0 5c-.5 1.5-1 3-1.5 4.5"/>
+        </svg>
+        <p class="mt-4 text-xl">Checking for alerts...</p>
+      </div>
+    </div>
+
+    <!-- Alerts container -->
+    <div id="alerts-container" class="hidden space-y-6"></div>
+  </div>
+
+  <!-- US Alerts Map -->
+  <div id="map"></div>
+  <div id="sidebar">
+    <div id="sidebar-header" class="flex flex-col">
+      <h3 class="text-lg font-semibold">Active US Alerts</h3>
+      <div id="sidebar-controls" class="flex items-center mt-2">
+        <i id="toggle-radar" class="fas fa-cloud-showers-heavy"></i>
+        <i id="play-pause-radar" class="fas fa-play"></i>
+        <i id="toggle-dark-mode" class="fas fa-sun"></i>
+        <i id="toggle-sidebar" class="fas fa-chevron-left"></i>
+      </div>
+      <input type="range" id="radar-slider" min="0" max="9" value="9">
+    </div>
+    <div id="sidebar-content"></div>
+  </div>
+  <div id="sidebar-tab"><i class="fas fa-chevron-right"></i></div>
+  <div id="loader" class="loader">Loading alerts...</div>
+
+  <!-- Scripts -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <script>
+    /* ---------------- Ephrata Alerts (from ephrataalertschecker) ---------------- */
+    
+        // National Weather Service (NWS) API
+        const NWS_API_URL = "https://api.weather.gov";
+        const ZONE_ID = "PAZ066"; // NWS Zone ID for Lancaster County, PA
+
+        const alertsContainer = document.getElementById('alerts-container');
+        const loadingElement = document.getElementById('loading');
+
+        // Function to get an icon based on alert severity
+        function getSeverityIcon(severity) {
+            switch(severity.toLowerCase()) {
+                case 'minor':
+                    return `<svg class="w-6 h-6 flex-shrink-0 text-yellow-500 dark:text-yellow-300" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>`;
+                case 'moderate':
+                    return `<svg class="w-6 h-6 flex-shrink-0 text-orange-500 dark:text-orange-300" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>`;
+                case 'severe':
+                case 'extreme':
+                    return `<svg class="w-6 h-6 flex-shrink-0 text-red-500 dark:text-red-300" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>`;
+                default:
+                    return `<svg class="w-6 h-6 flex-shrink-0 text-blue-500 dark:text-blue-300" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>`;
+            }
+        }
+
+        // Function to get a color based on alert severity
+        function getSeverityColor(severity) {
+            switch(severity.toLowerCase()) {
+                case 'minor':
+                    return 'bg-yellow-50 border-yellow-200 text-yellow-800 dark:bg-yellow-950 dark:border-yellow-700 dark:text-yellow-200';
+                case 'moderate':
+                    return 'bg-orange-50 border-orange-200 text-orange-800 dark:bg-orange-950 dark:border-orange-700 dark:text-orange-200';
+                case 'severe':
+                    return 'bg-red-50 border-red-200 text-red-800 dark:bg-red-950 dark:border-red-700 dark:text-red-200';
+                case 'extreme':
+                    return 'bg-red-500 border-red-600 text-white dark:bg-red-700 dark:border-red-800';
+                default:
+                    return 'bg-blue-50 border-blue-200 text-blue-800 dark:bg-blue-950 dark:border-blue-700 dark:text-blue-200';
+            }
+        }
+
+        async function fetchWeatherAlerts() {
+            loadingElement.classList.remove('hidden');
+            alertsContainer.classList.add('hidden');
+            alertsContainer.innerHTML = ''; // Clear previous alerts
+
+            try {
+                const response = await fetch(`${NWS_API_URL}/alerts/active?zone=${ZONE_ID}`, {
+                    headers: {
+                        'User-Agent': 'EphrataWeatherAlertsApp, (myemail@example.com)' // NWS requires a User-Agent
+                    }
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const data = await response.json();
+
+                if (data.features.length === 0) {
+                    alertsContainer.innerHTML = `
+                        <div class="text-center p-8 bg-white dark:bg-slate-800 rounded-2xl shadow-lg border border-slate-200 dark:border-slate-700 fade-in">
+                            <p class="text-lg font-medium text-slate-600 dark:text-slate-400">No active weather alerts for Ephrata, PA.</p>
+                        </div>
+                    `;
+                } else {
+                    data.features.forEach(alert => {
+                        const props = alert.properties;
+                        const severityClass = getSeverityColor(props.severity);
+                        const severityIcon = getSeverityIcon(props.severity);
+                        
+                        const alertCard = `
+                            <div class="flex items-start gap-4 p-5 rounded-2xl shadow-lg border ${severityClass} fade-in">
+                                <div class="flex-shrink-0 mt-1">
+                                    ${severityIcon}
+                                </div>
+                                <div>
+                                    <h3 class="text-lg font-bold">${props.event}</h3>
+                                    <p class="text-sm font-semibold opacity-75 mt-1">Severity: ${props.severity}</p>
+                                    <p class="text-sm mt-2">${props.headline}</p>
+                                    <a href="${props.url}" target="_blank" class="mt-3 inline-block font-semibold hover:underline text-sm">Read more</a>
+                            </div>
+                        </div>
+                    `;
+                        alertsContainer.innerHTML += alertCard;
+                    });
+                }
+
+            } catch (error) {
+                console.error("Failed to fetch weather alerts:", error);
+                alertsContainer.innerHTML = `
+                    <div class="text-center p-8 bg-white dark:bg-slate-800 rounded-2xl shadow-lg border border-slate-200 dark:border-slate-700 fade-in">
+                        <h3 class="text-xl font-bold text-red-500">Error</h3>
+                        <p class="mt-2 text-slate-600 dark:text-slate-400">Failed to load weather alerts. Please try again later.</p>
+                        <p class="mt-1 text-sm text-slate-500 dark:text-slate-500">Details: ${error.message}</p>
+                    </div>
+                `;
+            } finally {
+                loadingElement.classList.add('hidden');
+                alertsContainer.classList.remove('hidden');
+            }
+        }
+
+        // Fetch alerts when the page loads
+        document.addEventListener('DOMContentLoaded', fetchWeatherAlerts);
+        // Refresh the data every 5 minutes (300000 ms)
+        setInterval(fetchWeatherAlerts, 300000);
+    
+  </script>
+
+  <!-- Full US alerts + radar script -->
+  <script>
+    
+        // Initialize map
+        const map = L.map('map').setView([39, -98], 4);
+        let tileLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors | Radar data: <a href="https://www.rainviewer.com">RainViewer</a>'
+        }).addTo(map);
+
+        // Alert colors
+        const alertColors = {
+            'Tornado Warning': '#FF0000',
+            'Severe Thunderstorm Warning': '#FFA500',
+            'Flash Flood Warning': '#008000',
+            'Special Weather Statement': '#D2B48C',
+            'Flood Warning': '#00FF00',
+            'Winter Storm Warning': '#FF69B4',
+            'High Wind Warning': '#C71585',
+            'Hurricane Warning': '#DC143C',
+            'Tropical Storm Warning': '#FF4500',
+            'Storm Surge Warning': '#9932CC',
+            'Extreme Wind Warning': '#8B0000',
+            'Blizzard Warning': '#FF1493',
+            'Flood Advisory': '#39FF14',
+            'Red Flag Warning': '#FF4040',
+            'Marine Weather Statement': '#00FFFF',
+            'Small Craft Advisory': '#4682B4',
+            'Air Quality Alert': '#A9A9A9',
+            'Hydrologic Outlook': '#00CED1',
+            'Special Marine Warning': '#D8BFD8',
+            'Dust Storm Warning': '#D2B48C',
+            'Dust Advisory': '#D2B48C',
+            'default': '#808080'
+        };
+
+        // Fetch US alerts from NWS API
+        async function fetchUSAlerts() {
+            try {
+                const response = await fetch('https://api.weather.gov/alerts/active?status=actual', {
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (compatible; WeatherMapApp/1.0)'
+                    }
+                });
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const data = await response.json();
+                return Array.isArray(data.features) ? data.features : [];
+            } catch (error) {
+                console.error('Error fetching US alerts:', error);
+                return [];
+            }
+        }
+
+        // Fetch RainViewer radar data (only past scans)
+        let radarFrames = [];
+        async function fetchRadarData() {
+            try {
+                const response = await fetch('https://api.rainviewer.com/public/weather-maps.json');
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const data = await response.json();
+                if (!data.radar || !data.radar.past || data.radar.past.length === 0) {
+                    throw new Error('No past radar data available');
+                }
+                radarFrames = data.radar.past.slice(-10).map(frame => ({
+                    path: frame.path,
+                    time: frame.time
+                }));
+                return radarFrames;
+            } catch (error) {
+                console.error('Error fetching radar data:', error);
+                document.getElementById('sidebar-content').innerHTML = '<p>Error loading radar data. Try again later.</p>';
+                return [];
+            }
+        }
+
+        // Initialize radar layer
+        let radarLayer = null;
+        let radarEnabled = false;
+        let isPlaying = false;
+        let currentFrameIndex = 0;
+        let animationInterval = null;
+
+        async function updateRadarLayer(index) {
+            if (!radarEnabled || !radarFrames[index]) return;
+            if (radarLayer) {
+                map.removeLayer(radarLayer);
+            }
+            radarLayer = L.tileLayer(`https://tilecache.rainviewer.com${radarFrames[index].path}/256/{z}/{x}/{y}/2/1_0.png`, {
+                opacity: 0.7,
+                zIndex: 2,
+                attribution: 'Radar data: <a href="https://www.rainviewer.com">RainViewer</a>'
+            }).addTo(map);
+            document.getElementById('radar-slider').value = index;
+        }
+
+        function startRadarAnimation() {
+            if (isPlaying) return;
+            isPlaying = true;
+            document.getElementById('play-pause-radar').className = 'fas fa-pause';
+            animationInterval = setInterval(() => {
+                currentFrameIndex = (currentFrameIndex + 1) % radarFrames.length;
+                updateRadarLayer(currentFrameIndex);
+            }, 500);
+        }
+
+        function stopRadarAnimation() {
+            if (!isPlaying) return;
+            isPlaying = false;
+            document.getElementById('play-pause-radar').className = 'fas fa-play';
+            clearInterval(animationInterval);
+        }
+
+        async function toggleRadar() {
+            if (radarEnabled) {
+                if (radarLayer) {
+                    map.removeLayer(radarLayer);
+                    radarLayer = null;
+                }
+                stopRadarAnimation();
+                radarEnabled = false;
+                document.getElementById('toggle-radar').className = 'fas fa-cloud';
+                document.getElementById('radar-slider').style.display = 'none';
+                document.getElementById('play-pause-radar').style.display = 'none';
+            } else {
+                radarFrames = await fetchRadarData();
+                if (radarFrames.length > 0) {
+                    radarEnabled = true;
+                    currentFrameIndex = radarFrames.length - 1;
+                    document.getElementById('toggle-radar').className = 'fas fa-cloud-showers-heavy';
+                    document.getElementById('radar-slider').style.display = 'block';
+                    document.getElementById('radar-slider').max = radarFrames.length - 1;
+                    document.getElementById('play-pause-radar').style.display = 'inline-block';
+                    document.getElementById('play-pause-radar').className = 'fas fa-play';
+                    updateRadarLayer(currentFrameIndex);
+                }
+            }
+        }
+
+        // Process and display alerts
+        async function displayAlerts() {
+            const alerts = await fetchUSAlerts();
+            const sidebarContent = document.getElementById('sidebar-content');
+            const loader = document.getElementById('loader');
+            loader.style.display = 'none';
+
+            sidebarContent.innerHTML = '';
+
+            if (!Array.isArray(alerts) || alerts.length === 0) {
+                sidebarContent.innerHTML = '<p>No active alerts with map data.</p>';
+                return;
+            }
+
+            const bounds = L.latLngBounds();
+            let hasVisibleAlerts = false;
+
+            alerts.forEach(alert => {
+                const props = alert.properties || {};
+                const geometry = alert.geometry;
+
+                if (!geometry || !geometry.coordinates || !['Polygon', 'MultiPolygon'].includes(geometry.type)) {
+                    return; // Skip alerts without valid geometry
+                }
+
+                hasVisibleAlerts = true;
+
+                const color = alertColors[props.event] || alertColors.default;
+                const popupContent = `
+                    <b>${props.event || 'Unknown Event'}</b><br>
+                    <b>Area:</b> ${props.areaDesc || 'N/A'}<br>
+                    <b>Effective:</b> ${props.effective ? new Date(props.effective).toLocaleString() : 'N/A'}<br>
+                    <b>Expires:</b> ${props.expires ? new Date(props.expires).toLocaleString() : 'N/A'}<br>
+                    <b>Severity:</b> ${props.severity || 'N/A'}<br>
+                    <b>Description:</b> ${props.description || 'No description available'}<br>
+                    <b>Instruction:</b> ${props.instruction || 'None'}
+                `;
+
+                let coords;
+                if (geometry.type === 'Polygon') {
+                    coords = [geometry.coordinates[0].map(coord => [coord[1], coord[0]])];
+                } else if (geometry.type === 'MultiPolygon') {
+                    coords = geometry.coordinates.map(poly => poly[0].map(coord => [coord[1], coord[0]]));
+                }
+
+                if (coords) {
+                    const polygon = L.polygon(coords, {
+                        color: color,
+                        fillColor: color,
+                        fillOpacity: 0.4,
+                        weight: 2
+                    }).addTo(map).bindPopup(popupContent, {
+                        maxWidth: '80vw',
+                        className: 'custom-popup'
+                    });
+
+                    if (polygon.getBounds()._southWest) {
+                        bounds.extend(polygon.getBounds());
+                    }
+
+                    const alertItem = document.createElement('div');
+                    alertItem.className = 'alert-item';
+                    alertItem.style.borderLeft = `5px solid ${color}`;
+                    alertItem.innerHTML = `
+                        <b>${props.event || 'Unknown Event'}</b><br>
+                        ${props.areaDesc || 'N/A'}<br>
+                        Expires: ${props.expires ? new Date(props.expires).toLocaleString() : 'N/A'}
+                    `;
+                    alertItem.addEventListener('click', () => {
+                        map.openPopup(popupContent, L.latLngBounds(coords).getCenter(), {
+                            maxWidth: '80vw',
+                            className: 'custom-popup'
+                        });
+                        map.panTo(L.latLngBounds(coords).getCenter());
+                    });
+                    sidebarContent.appendChild(alertItem);
+                }
+            });
+
+            if (!hasVisibleAlerts) {
+                sidebarContent.innerHTML = '<p>No alerts with map data available.</p>';
+                return;
+            }
+
+            if (bounds.isValid()) {
+                map.fitBounds(bounds);
+            }
+        }
+
+        // Sidebar toggle
+        const sidebar = document.getElementById('sidebar');
+        const toggleButton = document.getElementById('toggle-sidebar');
+        const sidebarTab = document.getElementById('sidebar-tab');
+
+        function toggleSidebar() {
+            sidebar.classList.toggle('hidden');
+            toggleButton.className = sidebar.classList.contains('hidden') ? 'fas fa-chevron-right' : 'fas fa-chevron-left';
+            sidebarTab.style.display = sidebar.classList.contains('hidden') ? 'block' : 'none';
+        }
+
+        toggleButton.addEventListener('click', toggleSidebar);
+        sidebarTab.addEventListener('click', toggleSidebar);
+
+        // Dark mode toggle
+        const toggleDarkMode = document.getElementById('toggle-dark-mode');
+        function updateDarkMode() {
+            document.body.classList.toggle('dark-mode');
+            const isDarkMode = document.body.classList.contains('dark-mode');
+            toggleDarkMode.className = isDarkMode ? 'fas fa-sun' : 'fas fa-moon';
+            map.removeLayer(tileLayer);
+            tileLayer = L.tileLayer(isDarkMode ? 
+                'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png' :
+                'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors | Radar data: <a href="https://www.rainviewer.com">RainViewer</a>'
+            }).addTo(map);
+            if (radarEnabled && radarLayer) {
+                map.removeLayer(radarLayer);
+                updateRadarLayer(currentFrameIndex);
+            }
+        }
+
+        toggleDarkMode.addEventListener('click', updateDarkMode);
+
+        // Radar toggle
+        const toggleRadarButton = document.getElementById('toggle-radar');
+        toggleRadarButton.addEventListener('click', toggleRadar);
+
+        // Play/Pause radar animation
+        const playPauseButton = document.getElementById('play-pause-radar');
+        playPauseButton.addEventListener('click', () => {
+            if (isPlaying) {
+                stopRadarAnimation();
+            } else {
+                startRadarAnimation();
+            }
+        });
+
+        // Radar slider
+        const radarSlider = document.getElementById('radar-slider');
+        radarSlider.addEventListener('input', () => {
+            stopRadarAnimation();
+            currentFrameIndex = parseInt(radarSlider.value);
+            updateRadarLayer(currentFrameIndex);
+        });
+
+        // Ensure tab visibility is correct on page load
+        sidebarTab.style.display = sidebar.classList.contains('hidden') ? 'block' : 'none';
+
+        // Load alerts and enable radar on page load
+        async function initialize() {
+            await displayAlerts();
+            await toggleRadar();
+        }
+        initialize();
+    
+  </script>
+
+</body>
+</html>
